@@ -13,6 +13,7 @@ const KEY_FILE = path.join(__dirname, 'global-key.json');
 const USAGE_FILE = path.join(__dirname, 'usage-stats.json');
 const KEY_LENGTH = 27;
 const PORT = process.env.PORT || 3000;
+const API_KEY = "ILikeCats"; // Our API key as requested
 
 console.log('Starting bot...');
 
@@ -30,8 +31,32 @@ if (!CLIENT_ID) {
 // Set up Express server for 24/7 uptime
 const app = express();
 
+// Middleware to verify API key
+const verifyApiKey = (req, res, next) => {
+  const providedKey = req.query.apiKey || req.headers['x-api-key'];
+  
+  if (!providedKey || providedKey !== API_KEY) {
+    return res.status(401).send('Unauthorized: Invalid API key');
+  }
+  
+  next();
+};
+
+// Public route - no API key needed
 app.get('/', (req, res) => {
   res.send('Webserver OK, Discord Bot OK');
+});
+
+// Protected route - requires API key
+app.get('/key-materon', verifyApiKey, (req, res) => {
+  const keyData = getKey();
+  
+  // Set headers for compatibility with Roblox Luau executors
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  
+  // Return just the raw key text for Luau executors
+  res.send(keyData.key);
 });
 
 app.listen(PORT, () => {
