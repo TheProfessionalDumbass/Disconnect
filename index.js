@@ -1,8 +1,9 @@
-// Discord Bot with Key Management and Usage Tracking
+// Discord Bot with Key Management, Usage Tracking, and Express Server for 24/7 uptime
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const express = require('express'); // Make sure to install: npm install express
 require('dotenv').config();
 
 // Configuration
@@ -11,6 +12,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const KEY_FILE = path.join(__dirname, 'global-key.json');
 const USAGE_FILE = path.join(__dirname, 'usage-stats.json');
 const KEY_LENGTH = 27;
+const PORT = process.env.PORT || 3000;
 
 console.log('Starting bot...');
 
@@ -24,6 +26,17 @@ if (!CLIENT_ID) {
   console.error('ERROR: CLIENT_ID environment variable is not set');
   process.exit(1);
 }
+
+// Set up Express server for 24/7 uptime
+const app = express();
+
+app.get('/', (req, res) => {
+  res.send('Webserver OK, Discord Bot OK');
+});
+
+app.listen(PORT, () => {
+  console.log(`Express server running on port ${PORT}`);
+});
 
 // Create a new client instance
 const client = new Client({ 
@@ -289,4 +302,4 @@ client.login(TOKEN).then(() => {
   console.error('Login failed:', error);
 });
 
-console.log('Bot is now running');
+console.log('Bot is now running with Express server for 24/7 uptime');
