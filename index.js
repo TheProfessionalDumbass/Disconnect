@@ -14,7 +14,7 @@ const USER_MESSAGES_FILE = path.join(__dirname, 'user-messages.json');
 const KEY_LENGTH = 27;
 const PORT = process.env.PORT || 3000;
 const API_KEY = "ILikeCats"; // Our API key as requested
-const REQUIRED_MESSAGE_COUNT = 75; // Number of messages required before getting a key
+const REQUIRED_MESSAGE_COUNT = 20; // Number of messages required before getting a key
 
 console.log('Starting bot with verification checks...');
 
