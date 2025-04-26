@@ -1,4 +1,3 @@
-// Discord Bot with Key Management, Usage Tracking, and Express Server for 24/7 uptime
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
@@ -11,11 +10,13 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const KEY_FILE = path.join(__dirname, 'global-key.json');
 const USAGE_FILE = path.join(__dirname, 'usage-stats.json');
+const USER_MESSAGES_FILE = path.join(__dirname, 'user-messages.json');
 const KEY_LENGTH = 27;
 const PORT = process.env.PORT || 3000;
 const API_KEY = "ILikeCats"; // Our API key as requested
+const REQUIRED_MESSAGE_COUNT = 75; // Number of messages required before getting a key
 
-console.log('Starting bot...');
+console.log('Starting bot with verification checks...');
 
 // Check if environment variables are set
 if (!TOKEN) {
@@ -67,9 +68,101 @@ app.listen(PORT, () => {
 const client = new Client({ 
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,  // Add this intent to track messages
+    GatewayIntentBits.GuildMembers     // Add this intent to check user properties
   ] 
 });
+
+// Message tracking functions
+function loadUserMessages() {
+  if (!fs.existsSync(USER_MESSAGES_FILE)) {
+    return { users: {} };
+  }
+  
+  try {
+    const data = fs.readFileSync(USER_MESSAGES_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Error loading user messages:', error);
+    return { users: {} };
+  }
+}
+
+function saveUserMessages(data) {
+  fs.writeFileSync(USER_MESSAGES_FILE, JSON.stringify(data, null, 2));
+}
+
+function trackUserMessage(userId, username) {
+  const messageData = loadUserMessages();
+  
+  if (!messageData.users[userId]) {
+    messageData.users[userId] = {
+      username: username,
+      messageCount: 0,
+      firstMessageAt: new Date().toISOString(),
+      lastMessageAt: new Date().toISOString(),
+      isVerified: false
+    };
+  }
+  
+  // Update the user data
+  messageData.users[userId].messageCount++;
+  messageData.users[userId].username = username; // Update username in case it changed
+  messageData.users[userId].lastMessageAt = new Date().toISOString();
+  
+  saveUserMessages(messageData);
+  return messageData.users[userId];
+}
+
+function verifyUser(userId) {
+  const messageData = loadUserMessages();
+  
+  if (messageData.users[userId]) {
+    messageData.users[userId].isVerified = true;
+    saveUserMessages(messageData);
+  }
+}
+
+function checkUserEligibility(userId) {
+  const messageData = loadUserMessages();
+  
+  if (!messageData.users[userId]) {
+    return {
+      eligible: false,
+      messageCount: 0,
+      isVerified: false,
+      reason: "User not found in database"
+    };
+  }
+  
+  const userData = messageData.users[userId];
+  
+  if (!userData.isVerified) {
+    return {
+      eligible: false,
+      messageCount: userData.messageCount,
+      isVerified: false,
+      reason: "User not verified as human"
+    };
+  }
+  
+  if (userData.messageCount < REQUIRED_MESSAGE_COUNT) {
+    return {
+      eligible: false,
+      messageCount: userData.messageCount,
+      isVerified: true,
+      reason: `Need ${REQUIRED_MESSAGE_COUNT - userData.messageCount} more messages`
+    };
+  }
+  
+  return {
+    eligible: true,
+    messageCount: userData.messageCount,
+    isVerified: true,
+    reason: "User meets all requirements"
+  };
+}
 
 // Key management functions
 function generateKey() {
@@ -175,7 +268,7 @@ function trackCommandUsage(userId, username, commandName) {
 const commands = [
   new SlashCommandBuilder()
     .setName('get-key')
-    .setDescription('Get the current global key'),
+    .setDescription('Get the current global key (requires verification & 10 messages)'),
   
   new SlashCommandBuilder()
     .setName('reset-key')
@@ -183,7 +276,15 @@ const commands = [
     
   new SlashCommandBuilder()
     .setName('usage-stats')
-    .setDescription('View command usage statistics (Server Owner only)')
+    .setDescription('View command usage statistics (Server Owner only)'),
+    
+  new SlashCommandBuilder()
+    .setName('verify-me')
+    .setDescription('Verify yourself as a human user'),
+    
+  new SlashCommandBuilder()
+    .setName('my-stats')
+    .setDescription('Check your message count and verification status')
 ];
 
 console.log('Registering slash commands...');
@@ -220,8 +321,27 @@ client.once('ready', () => {
     saveUsageStats({ users: {} });
     console.log('Usage stats file initialized');
   }
+  
+  // Initialize user messages file if it doesn't exist
+  if (!fs.existsSync(USER_MESSAGES_FILE)) {
+    saveUserMessages({ users: {} });
+    console.log('User messages file initialized');
+  }
 });
 
+// Track normal messages from users
+client.on('messageCreate', message => {
+  // Ignore messages from bots (including our own)
+  if (message.author.bot) return;
+  
+  // Track this message for the user
+  const userData = trackUserMessage(message.author.id, message.author.username);
+  
+  // Log for debugging
+  console.log(`Message from ${message.author.username} (${message.author.id}), total: ${userData.messageCount}`);
+});
+
+// Handle slash commands
 client.on('interactionCreate', async interaction => {
   if (!interaction.isCommand()) return;
   
@@ -231,6 +351,17 @@ client.on('interactionCreate', async interaction => {
   trackCommandUsage(user.id, user.username, commandName);
   
   if (commandName === 'get-key') {
+    // Check if user is eligible for a key
+    const eligibility = checkUserEligibility(user.id);
+    
+    if (!eligibility.eligible) {
+      await interaction.reply({
+        content: `You're not eligible to get a key yet.\nReason: ${eligibility.reason}\nMessage count: ${eligibility.messageCount}/${REQUIRED_MESSAGE_COUNT}\nVerified: ${eligibility.isVerified ? 'Yes' : 'No'}`,
+        ephemeral: true
+      });
+      return;
+    }
+    
     const keyData = getKey();
     
     // Calculate time remaining
@@ -305,6 +436,40 @@ client.on('interactionCreate', async interaction => {
     
     await interaction.reply({
       content: `# Command Usage Statistics\n\`\`\`\n${statsTable}\`\`\``,
+      ephemeral: true
+    });
+  } else if (commandName === 'verify-me') {
+    // Simple verification - in a real system you might use CAPTCHA or other methods
+    verifyUser(user.id);
+    
+    await interaction.reply({
+      content: `You have been verified as a human user! You still need at least ${REQUIRED_MESSAGE_COUNT} messages before you can get a key.`,
+      ephemeral: true
+    });
+  } else if (commandName === 'my-stats') {
+    const messageData = loadUserMessages();
+    const userData = messageData.users[user.id] || {
+      messageCount: 0,
+      isVerified: false,
+      firstMessageAt: 'Never',
+      lastMessageAt: 'Never'
+    };
+    
+    const eligibility = checkUserEligibility(user.id);
+    const remainingMessages = userData.messageCount < REQUIRED_MESSAGE_COUNT ? 
+      REQUIRED_MESSAGE_COUNT - userData.messageCount : 0;
+    
+    await interaction.reply({
+      content: `# Your Stats
+Message Count: ${userData.messageCount}/${REQUIRED_MESSAGE_COUNT}
+Verified as Human: ${userData.isVerified ? '✅ Yes' : '❌ No'}
+First Message: ${userData.firstMessageAt !== 'Never' ? new Date(userData.firstMessageAt).toLocaleString() : 'Never'}
+Last Message: ${userData.lastMessageAt !== 'Never' ? new Date(userData.lastMessageAt).toLocaleString() : 'Never'}
+
+Key Eligibility: ${eligibility.eligible ? '✅ Eligible' : '❌ Not Eligible'}
+${!eligibility.eligible ? `Reason: ${eligibility.reason}` : ''}
+${remainingMessages > 0 ? `You need ${remainingMessages} more messages before you can get a key.` : ''}
+${!userData.isVerified ? 'Please use the /verify-me command to verify yourself as a human.' : ''}`,
       ephemeral: true
     });
   }
