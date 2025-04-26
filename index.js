@@ -10,12 +10,16 @@ require('dotenv').config();
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const KEY_FILE = path.join(__dirname, 'global-key.json');
-const USAGE_FILE = path.join(__dirname, 'usage-stats.json');
 const AUTO_RESPONSES_FILE = path.join(__dirname, 'auto-responses.json');
 const KEY_LENGTH = 27;
 const PORT = process.env.PORT || 3000;
 const API_KEY = "ILikeCats"; // Our API key as requested
-const MESSAGE_THRESHOLD = 10; // Number of messages required before getting key
+const MESSAGE_THRESHOLD = 5; // Reduced to 5 messages
+
+// Anti-spam configuration
+const SPAM_THRESHOLD = 5; // Number of messages in time window to be considered spam
+const SPAM_TIME_WINDOW = 5000; // Time window in milliseconds (5 seconds)
+const SPAM_TIMEOUT_DURATION = 60 * 1000; // 1 minute timeout for spammers
 
 console.log('Starting bot...');
 
@@ -75,12 +79,17 @@ const client = new Client({
   ] 
 });
 
-// User verification tracking
-const userVerification = new Map();
-// User message counter
+// In-memory data storage
+// User message counter - key: userId, value: message count
 const userMessageCount = new Map();
+// Command usage stats - key: userId, value: { username, commands: { commandName: { count, lastUsed } } }
+const usageStats = new Map();
 // Auto responses
 let autoResponses = [];
+// Anti-spam tracking - key: userId, value: array of message timestamps
+const userMessageTimestamps = new Map();
+// Current key data - { key: string, expiresAt: timestamp }
+let currentKeyData = null;
 
 // Load auto responses
 function loadAutoResponses() {
@@ -116,90 +125,67 @@ function generateKey() {
   return key;
 }
 
-function saveKey(key) {
-  const data = {
-    key: key,
-    expiresAt: Date.now() + (12 * 60 * 60 * 1000) // 12 hours from now
-  };
-  
-  fs.writeFileSync(KEY_FILE, JSON.stringify(data, null, 2));
-  return data;
-}
-
 function getKey() {
-  // If file doesn't exist or is empty, generate a new key
-  if (!fs.existsSync(KEY_FILE)) {
+  // If no key exists or key is expired, generate a new one
+  if (!currentKeyData || Date.now() > currentKeyData.expiresAt) {
     const key = generateKey();
-    return saveKey(key);
+    currentKeyData = {
+      key: key,
+      expiresAt: Date.now() + (12 * 60 * 60 * 1000) // 12 hours from now
+    };
+    
+    // Also save to file as backup if system restarts
+    try {
+      fs.writeFileSync(KEY_FILE, JSON.stringify(currentKeyData, null, 2));
+    } catch (error) {
+      console.error('Error saving key to file:', error);
+    }
   }
   
-  // Read and parse the current key data
-  const fileContent = fs.readFileSync(KEY_FILE, 'utf8');
-  
-  if (!fileContent || fileContent.trim() === '') {
-    const key = generateKey();
-    return saveKey(key);
-  }
-  
-  const data = JSON.parse(fileContent);
-  
-  // Check if key is expired
-  if (Date.now() > data.expiresAt) {
-    const key = generateKey();
-    return saveKey(key);
-  }
-  
-  return data;
+  return currentKeyData;
 }
 
 function resetKey() {
   const key = generateKey();
-  return saveKey(key);
-}
-
-// Usage tracking functions
-function loadUsageStats() {
-  if (!fs.existsSync(USAGE_FILE)) {
-    return { users: {} };
-  }
+  currentKeyData = {
+    key: key,
+    expiresAt: Date.now() + (12 * 60 * 60 * 1000) // 12 hours from now
+  };
   
+  // Also save to file as backup
   try {
-    const data = fs.readFileSync(USAGE_FILE, 'utf8');
-    return JSON.parse(data);
+    fs.writeFileSync(KEY_FILE, JSON.stringify(currentKeyData, null, 2));
   } catch (error) {
-    console.error('Error loading usage stats:', error);
-    return { users: {} };
+    console.error('Error saving reset key to file:', error);
   }
-}
-
-function saveUsageStats(stats) {
-  fs.writeFileSync(USAGE_FILE, JSON.stringify(stats, null, 2));
-}
-
-function trackCommandUsage(userId, username, commandName) {
-  const stats = loadUsageStats();
   
-  if (!stats.users[userId]) {
-    stats.users[userId] = {
+  return currentKeyData;
+}
+
+// Command usage tracking function
+function trackCommandUsage(userId, username, commandName) {
+  if (!usageStats.has(userId)) {
+    usageStats.set(userId, {
       username: username,
       commands: {}
-    };
+    });
   }
   
-  // Make sure username is updated in case it changed
-  stats.users[userId].username = username;
+  const userData = usageStats.get(userId);
+  // Update username in case it changed
+  userData.username = username;
   
-  if (!stats.users[userId].commands[commandName]) {
-    stats.users[userId].commands[commandName] = {
+  if (!userData.commands[commandName]) {
+    userData.commands[commandName] = {
       count: 0,
       lastUsed: null
     };
   }
   
-  stats.users[userId].commands[commandName].count++;
-  stats.users[userId].commands[commandName].lastUsed = new Date().toISOString();
+  userData.commands[commandName].count++;
+  userData.commands[commandName].lastUsed = new Date().toISOString();
   
-  saveUsageStats(stats);
+  usageStats.set(userId, userData);
 }
 
 // Message counter function
@@ -218,15 +204,35 @@ function hasEnoughMessages(userId) {
   return (userMessageCount.get(userId) || 0) >= MESSAGE_THRESHOLD;
 }
 
+// Anti-spam check function
+function isUserSpamming(userId) {
+  const now = Date.now();
+  
+  if (!userMessageTimestamps.has(userId)) {
+    userMessageTimestamps.set(userId, [now]);
+    return false;
+  }
+  
+  const timestamps = userMessageTimestamps.get(userId);
+  
+  // Add current timestamp
+  timestamps.push(now);
+  
+  // Remove timestamps outside the time window
+  const recentTimestamps = timestamps.filter(timestamp => now - timestamp < SPAM_TIME_WINDOW);
+  
+  // Update the stored timestamps
+  userMessageTimestamps.set(userId, recentTimestamps);
+  
+  // Check if user is spamming
+  return recentTimestamps.length >= SPAM_THRESHOLD;
+}
+
 // Register commands
 const commands = [
   new SlashCommandBuilder()
     .setName('get-key')
-    .setDescription('Get the current global key (requires 10 messages in server)'),
-    
-  new SlashCommandBuilder()
-    .setName('verify-me')
-    .setDescription('Check your verification status'),
+    .setDescription('Get the current global key (requires 5 messages in server)'),
   
   new SlashCommandBuilder()
     .setName('reset-key')
@@ -310,17 +316,26 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}!`);
   
-  // Initialize key file if it doesn't exist
-  if (!fs.existsSync(KEY_FILE)) {
-    const key = generateKey();
-    saveKey(key);
-    console.log('Initial key generated');
-  }
-  
-  // Initialize usage stats file if it doesn't exist
-  if (!fs.existsSync(USAGE_FILE)) {
-    saveUsageStats({ users: {} });
-    console.log('Usage stats file initialized');
+  // Try to load key from file first if it exists
+  if (fs.existsSync(KEY_FILE)) {
+    try {
+      const data = fs.readFileSync(KEY_FILE, 'utf8');
+      currentKeyData = JSON.parse(data);
+      
+      // Check if the loaded key is expired
+      if (Date.now() > currentKeyData.expiresAt) {
+        console.log('Loaded key is expired, generating new one');
+        getKey(); // This will generate a new key
+      } else {
+        console.log('Key loaded from file');
+      }
+    } catch (error) {
+      console.error('Error loading key from file:', error);
+      getKey(); // Generate new key if loading fails
+    }
+  } else {
+    console.log('No key file exists, generating new key');
+    getKey(); // Generate initial key
   }
   
   // Load auto responses
@@ -328,10 +343,26 @@ client.once('ready', () => {
   console.log(`Loaded ${autoResponses.length} auto-responses`);
 });
 
-// Handle messages for auto-responses and message counting
+// Handle messages for auto-responses, message counting, and anti-spam
 client.on('messageCreate', async message => {
   // Ignore bot messages
   if (message.author.bot) return;
+  
+  // Check for spam
+  if (isUserSpamming(message.author.id)) {
+    try {
+      // Timeout user for spam
+      const member = await message.guild.members.fetch(message.author.id);
+      await member.timeout(SPAM_TIMEOUT_DURATION, 'Message spam detected');
+      
+      // Notify about timeout
+      await message.channel.send(`${message.author} has been timed out for ${SPAM_TIMEOUT_DURATION/1000} seconds due to message spam.`);
+      
+      return; // Skip further processing
+    } catch (error) {
+      console.error('Error timing out user for spam:', error);
+    }
+  }
   
   // Increment message count for user
   incrementMessageCount(message.author.id);
@@ -357,26 +388,7 @@ client.on('interactionCreate', async interaction => {
   // Track command usage
   trackCommandUsage(user.id, user.username, commandName);
   
-  if (commandName === 'verify-me') {
-    const messageCount = userMessageCount.get(user.id) || 0;
-    const verified = hasEnoughMessages(user.id);
-    
-    const embed = new EmbedBuilder()
-      .setTitle('Verification Status')
-      .setColor(verified ? Colors.Green : Colors.Red)
-      .setDescription(
-        verified 
-          ? '✅ You are verified! You can now use `/get-key` to get the key.'
-          : `❌ Not verified yet. You need to send ${MESSAGE_THRESHOLD} messages in this server.\nCurrent progress: ${messageCount}/${MESSAGE_THRESHOLD}`
-      )
-      .setFooter({ text: `Requested by ${user.username}` })
-      .setTimestamp();
-    
-    await interaction.reply({
-      embeds: [embed],
-      ephemeral: true
-    });
-  } else if (commandName === 'get-key') {
+  if (commandName === 'get-key') {
     // Check if user has sent enough messages
     if (!hasEnoughMessages(user.id)) {
       await interaction.reply({
@@ -397,7 +409,7 @@ client.on('interactionCreate', async interaction => {
       .setTitle('Access Key')
       .setColor(Colors.Blue)
       .setDescription(`Your key: \`${keyData.key}\`\nExpires in: ${hoursRemaining}h ${minutesRemaining}m`)
-      .setFooter({ text: 'Keep this key private!' })
+      .setFooter({ text: 'This is a shareable key that changes every 12 hours' })
       .setTimestamp();
     
     await interaction.reply({
@@ -414,13 +426,6 @@ client.on('interactionCreate', async interaction => {
         ephemeral: true
       });
       return;
-    }
-    
-    // Backup the old key data to a log file
-    if (fs.existsSync(KEY_FILE)) {
-      const oldData = JSON.parse(fs.readFileSync(KEY_FILE));
-      const logFileName = `key-log-${Date.now()}.json`;
-      fs.writeFileSync(path.join(__dirname, logFileName), JSON.stringify(oldData, null, 2));
     }
     
     // Generate new key
@@ -442,10 +447,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
     
-    const stats = loadUsageStats();
-    const users = Object.values(stats.users);
-    
-    if (users.length === 0) {
+    if (usageStats.size === 0) {
       await interaction.reply({
         content: 'No usage statistics available yet.',
         ephemeral: true
@@ -457,12 +459,12 @@ client.on('interactionCreate', async interaction => {
     let statsTable = 'USER | COMMAND | COUNT | LAST USED\n';
     statsTable += '---- | ------- | ----- | ---------\n';
     
-    users.forEach(user => {
-      Object.entries(user.commands).forEach(([cmd, data]) => {
+    for (const [userId, userData] of usageStats.entries()) {
+      Object.entries(userData.commands).forEach(([cmd, data]) => {
         const lastUsed = new Date(data.lastUsed).toLocaleString();
-        statsTable += `${user.username} | /${cmd} | ${data.count} | ${lastUsed}\n`;
+        statsTable += `${userData.username} | /${cmd} | ${data.count} | ${lastUsed}\n`;
       });
-    });
+    }
     
     await interaction.reply({
       content: `# Command Usage Statistics\n\`\`\`\n${statsTable}\`\`\``,
