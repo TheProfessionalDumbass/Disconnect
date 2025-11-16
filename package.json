@@ -1,31 +1,17 @@
 {
-  "name": "discord-express-app",
+  "name": "openai-nim-proxy",
   "version": "1.0.0",
-  "description": "A Node.js application using Discord.js, Express, and dotenv",
-  "main": "index.js",
+  "description": "OpenAI compatible proxy for NVIDIA NIM API",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [
-    "discord",
-    "discord.js",
-    "express",
-    "nodejs",
-    "bot"
-  ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.0"
   },
   "engines": {
-    "node": ">=16.11.0"
+    "node": "22.x"
   }
 }
